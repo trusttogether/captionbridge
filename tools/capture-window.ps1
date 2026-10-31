@@ -58,7 +58,8 @@ $fake.Controls.Add($label)
 $fake.Show()
 Pump 300
 
-$proc = Start-Process -FilePath ([System.IO.Path]::GetFullPath($Exe)) -PassThru
+# --no-autostart keeps a real Live Captions window from winning the title match here.
+$proc = Start-Process -FilePath ([System.IO.Path]::GetFullPath($Exe)) -ArgumentList '--no-autostart' -PassThru
 try {
     $deadline = [System.Diagnostics.Stopwatch]::StartNew()
     while ($deadline.ElapsedMilliseconds -lt 20000) {

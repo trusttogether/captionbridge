@@ -10,6 +10,29 @@ internal static class NativeMethods
     public const int SbBottom = 7;
     public const int EmSetRect = 0x00B3;
 
+    public const int EmSetReadOnly = 0x00CF;
+    public const int EmGetSel = 0x00B0;
+    public const int EmSetSel = 0x00B1;
+    public const int EmPosFromChar = 0x00D6;
+    public const int EmCharFromPos = 0x00D7;
+
+    /// <summary>EM_GETOLEINTERFACE, which hands back the RichEdit text object.</summary>
+    public const int EmGetOleInterface = 0x043C;
+
+    /// <summary>EM_SETUNDOLIMIT.</summary>
+    public const int EmSetUndoLimit = 0x0452;
+
+    public const int EmSetOptions = 0x044D;
+    public const int EmGetOptions = 0x044E;
+    public const int EcoOpAnd = 3;
+    public const int EcoAutoWordSelection = 0x0001;
+
+    public const int WmLButtonDown = 0x0201;
+    public const int WmLButtonUp = 0x0202;
+    public const int WmMouseMove = 0x0200;
+    public const int WmCaptureChanged = 0x0215;
+    public const int MkShift = 0x0004;
+
     /// <summary>DWMWA_USE_IMMERSIVE_DARK_MODE on Windows 10 20H1 and later.</summary>
     public const int DwmwaUseImmersiveDarkMode = 20;
 
@@ -48,8 +71,24 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point32
+    {
+        public int X;
+        public int Y;
+    }
+
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, ref Rect lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, ref Point32 lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, out IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hwnd, int message, out int wParam, out int lParam);
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);

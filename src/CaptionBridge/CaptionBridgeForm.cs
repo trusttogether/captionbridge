@@ -14,32 +14,41 @@ internal sealed class CaptionBridgeForm : Form
     private const int ControlBarHeight = 30;
     private const int TextInset = 12;
 
-    private const string IdleHint =
-        "Windows Live Captions is not running.\r\n\r\n" +
-        "Press Win + Ctrl + L to turn it on, or right-click here and choose \"Start Windows Live Captions\".";
-
     private static readonly Color Background = Color.FromArgb(21, 25, 34);
     private static readonly Color Foreground = Color.FromArgb(244, 247, 251);
     private static readonly Color ControlBarBackground = Color.FromArgb(32, 38, 50);
 
-    private readonly TextBox _captionTextBox = new();
+    private readonly CaptionTextBox _captionTextBox = new();
     private readonly Panel _controlBar = new();
     private readonly TrackBar _fontSizeTrackBar = new();
     private readonly TrackBar _opacityTrackBar = new();
-    private readonly System.Windows.Forms.Timer _resumeTimer = new();
+    private readonly CheckBox _alwaysOnTopCheckBox = new();
+    private readonly Button _clearButton = new();
     private readonly CaptionSettings _settings;
     private readonly LiveCaptionReader _reader;
+    private readonly bool _autoStartLiveCaptions;
+
+    /// <summary>
+    /// Grown on the reader thread, so that no reading of the Live Captions window is ever
+    /// skipped: the transcript is built from every one of them, not from whichever happened to
+    /// be the latest when the window got around to repainting.
+    /// </summary>
+    private readonly CaptionTranscript _transcript = new();
+    private readonly object _transcriptLock = new();
+
+    private ToolStripMenuItem? _alwaysOnTopMenuItem;
+    private bool _syncingAlwaysOnTop;
 
     private string _pendingCaption = string.Empty;
     private bool _pendingAvailable;
     private int _flushQueued;
 
     private string _renderedText = string.Empty;
-    private bool _showingIdleHint;
     private string _statusSuffix = string.Empty;
 
-    public CaptionBridgeForm()
+    public CaptionBridgeForm(bool autoStartLiveCaptions)
     {
+        _autoStartLiveCaptions = autoStartLiveCaptions;
         _settings = CaptionSettingsStore.Load();
         _reader = new LiveCaptionReader(_settings.PollIntervalMs);
 
@@ -48,12 +57,6 @@ internal sealed class CaptionBridgeForm : Form
         _reader.CaptionChanged += OnCaptionChanged;
         _reader.AvailabilityChanged += OnAvailabilityChanged;
     }
-
-    /// <summary>
-    /// True while the user has text selected. Rewriting the box would destroy the selection,
-    /// so the mirror pauses until the selection is released.
-    /// </summary>
-    private bool IsHoldingForSelection => !_captionTextBox.IsDisposed && _captionTextBox.SelectionLength > 0;
 
     public void SurfaceWindow()
     {
@@ -77,8 +80,28 @@ internal sealed class CaptionBridgeForm : Form
     {
         base.OnShown(e);
         ApplyTextInset();
+
+        if (_autoStartLiveCaptions)
+        {
+            _ = StartLiveCaptionsAsync();
+        }
+
         _reader.Start();
-        _resumeTimer.Start();
+    }
+
+    private async Task StartLiveCaptionsAsync()
+    {
+        // Reading the process list and asking the shell to start a program are both slow enough
+        // to hold up the first paint, and the reader picks the window up whenever it turns up.
+        await Task.Run(LiveCaptionsLauncher.EnsureRunning);
+
+        // Live Captions is itself an always-on-top window, and it comes up in front of this
+        // one. Once it has had time to appear, this window takes the front back.
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        if (!IsDisposed && _settings.AlwaysOnTop)
+        {
+            ApplyAlwaysOnTop(true);
+        }
     }
 
     protected override void OnResize(EventArgs e)
@@ -89,7 +112,6 @@ internal sealed class CaptionBridgeForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _resumeTimer.Stop();
         _reader.CaptionChanged -= OnCaptionChanged;
         _reader.AvailabilityChanged -= OnAvailabilityChanged;
         _reader.Dispose();
@@ -101,7 +123,6 @@ internal sealed class CaptionBridgeForm : Form
     {
         if (disposing)
         {
-            _resumeTimer.Dispose();
             _reader.Dispose();
         }
 
@@ -123,11 +144,14 @@ internal sealed class CaptionBridgeForm : Form
 
         ApplySavedPlacement();
 
-        _captionTextBox.Multiline = true;
         _captionTextBox.ReadOnly = true;
         _captionTextBox.HideSelection = false;
         _captionTextBox.WordWrap = true;
-        _captionTextBox.ScrollBars = ScrollBars.Vertical;
+        _captionTextBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+
+        // A caption is speech, not a document: turning words into clickable links would only
+        // repaint text the mirror is about to replace anyway.
+        _captionTextBox.DetectUrls = false;
         _captionTextBox.BorderStyle = BorderStyle.None;
         _captionTextBox.BackColor = Background;
         _captionTextBox.ForeColor = Foreground;
@@ -143,18 +167,36 @@ internal sealed class CaptionBridgeForm : Form
         _fontSizeTrackBar.ValueChanged += (_, _) => ApplyFontSize(_fontSizeTrackBar.Value);
         _opacityTrackBar.ValueChanged += (_, _) => ApplyOpacity(_opacityTrackBar.Value);
 
+        _alwaysOnTopCheckBox.Text = "Always on top";
+        _alwaysOnTopCheckBox.Checked = _settings.AlwaysOnTop;
+        _alwaysOnTopCheckBox.AutoSize = true;
+        _alwaysOnTopCheckBox.BackColor = ControlBarBackground;
+        _alwaysOnTopCheckBox.ForeColor = Foreground;
+
+        // The themed tick is drawn on a light background whatever the control's colours say,
+        // so the flat one, which takes them, is the only version that reads on a dark bar.
+        _alwaysOnTopCheckBox.FlatStyle = FlatStyle.Flat;
+        _alwaysOnTopCheckBox.CheckedChanged += (_, _) => ApplyAlwaysOnTop(_alwaysOnTopCheckBox.Checked);
+
+        _clearButton.Text = "Clear";
+        _clearButton.Font = new Font("Segoe UI", 8f, FontStyle.Regular);
+        _clearButton.Padding = new Padding(4, 0, 4, 0);
+        _clearButton.FlatStyle = FlatStyle.Flat;
+        _clearButton.BackColor = ControlBarBackground;
+        _clearButton.ForeColor = Foreground;
+        _clearButton.FlatAppearance.BorderColor = Color.FromArgb(90, 100, 120);
+        _clearButton.TabStop = false;
+        _clearButton.Click += (_, _) => ClearCaptions();
+
         _controlBar.Controls.Add(_fontSizeTrackBar);
         _controlBar.Controls.Add(_opacityTrackBar);
+        _controlBar.Controls.Add(_alwaysOnTopCheckBox);
+        _controlBar.Controls.Add(_clearButton);
         Controls.Add(_captionTextBox);
         Controls.Add(_controlBar);
 
         ContextMenuStrip = BuildContextMenu();
         _captionTextBox.ContextMenuStrip = ContextMenuStrip;
-
-        // Selection release has no dedicated event, so a slow timer resumes the mirror once
-        // the user is done selecting and keeps the title in sync.
-        _resumeTimer.Interval = 150;
-        _resumeTimer.Tick += (_, _) => Render();
 
         Render();
         LayoutUi();
@@ -178,11 +220,29 @@ internal sealed class CaptionBridgeForm : Form
         _controlBar.SetBounds(0, captionHeight, ClientSize.Width, ControlBarHeight);
 
         const int gap = 8;
-        var trackBarWidth = Math.Max(80, (_controlBar.ClientSize.Width - gap - 16) / 2);
-        _fontSizeTrackBar.SetBounds(8, 4, trackBarWidth, 22);
+        const int edge = 8;
+        var checkBoxWidth = _alwaysOnTopCheckBox.PreferredSize.Width;
+        var clearSize = _clearButton.PreferredSize;
+        var clearWidth = clearSize.Width;
+        var clearHeight = Math.Min(18, clearSize.Height);
+        var forTrackBars = _controlBar.ClientSize.Width - (edge * 2) - (gap * 3) - checkBoxWidth - clearWidth;
+        var trackBarWidth = Math.Max(52, forTrackBars / 2);
+
+        _fontSizeTrackBar.SetBounds(edge, 4, trackBarWidth, 22);
         _opacityTrackBar.SetBounds(_fontSizeTrackBar.Right + gap, 4, trackBarWidth, 22);
+        _alwaysOnTopCheckBox.Location = new Point(
+            _opacityTrackBar.Right + gap,
+            (ControlBarHeight - _alwaysOnTopCheckBox.PreferredSize.Height) / 2);
+        _clearButton.SetBounds(
+            _alwaysOnTopCheckBox.Right + gap,
+            (ControlBarHeight - clearHeight) / 2,
+            clearWidth,
+            clearHeight);
 
         ApplyTextInset();
+
+        // Re-wrapping at the new width moves the text under the scroll position.
+        _captionTextBox.ScrollToBottom();
     }
 
     /// <summary>
@@ -231,15 +291,12 @@ internal sealed class CaptionBridgeForm : Form
     private ContextMenuStrip BuildContextMenu()
     {
         var alwaysOnTop = new ToolStripMenuItem("Always on top") { CheckOnClick = true, Checked = _settings.AlwaysOnTop };
-        alwaysOnTop.CheckedChanged += (_, _) =>
-        {
-            _settings.AlwaysOnTop = alwaysOnTop.Checked;
-            TopMost = alwaysOnTop.Checked;
-        };
+        alwaysOnTop.CheckedChanged += (_, _) => ApplyAlwaysOnTop(alwaysOnTop.Checked);
+        _alwaysOnTopMenuItem = alwaysOnTop;
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem("Copy", null, (_, _) => CopySelection()));
-        menu.Items.Add(new ToolStripMenuItem("Select all", null, (_, _) => _captionTextBox.SelectAll()));
+        menu.Items.Add(new ToolStripMenuItem("Select all", null, (_, _) => _captionTextBox.SelectAllText()));
         menu.Items.Add(new ToolStripMenuItem("Clear", null, (_, _) => ClearCaptions()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(BuildRefreshRateMenu());
@@ -290,7 +347,7 @@ internal sealed class CaptionBridgeForm : Form
         switch (e.KeyCode)
         {
             case Keys.A:
-                _captionTextBox.SelectAll();
+                _captionTextBox.SelectAllText();
                 e.SuppressKeyPress = true;
                 break;
             case Keys.C:
@@ -302,7 +359,7 @@ internal sealed class CaptionBridgeForm : Form
 
     private void CopySelection()
     {
-        var text = _captionTextBox.SelectionLength > 0 ? _captionTextBox.SelectedText : _captionTextBox.Text;
+        var text = _captionTextBox.GetTextToCopy();
         if (text.Length > 0)
         {
             Clipboard.SetText(text);
@@ -311,9 +368,14 @@ internal sealed class CaptionBridgeForm : Form
 
     private void ClearCaptions()
     {
-        _captionTextBox.Clear();
+        lock (_transcriptLock)
+        {
+            _transcript.Clear();
+        }
+
+        Volatile.Write(ref _pendingCaption, string.Empty);
+        _captionTextBox.ClearTranscript();
         _renderedText = string.Empty;
-        _showingIdleHint = false;
     }
 
     private void ApplyFontSize(int fontSize)
@@ -321,7 +383,40 @@ internal sealed class CaptionBridgeForm : Form
         _settings.FontSize = fontSize;
         _captionTextBox.Font = new Font("Segoe UI", fontSize, FontStyle.Regular);
         ApplyTextInset();
-        ScrollToBottom();
+        _captionTextBox.ScrollToBottom();
+    }
+
+    /// <summary>
+    /// Keeps the setting, the checkbox and the menu entry saying the same thing, whichever of
+    /// them was used.
+    /// </summary>
+    private void ApplyAlwaysOnTop(bool onTop)
+    {
+        if (_syncingAlwaysOnTop)
+        {
+            return;
+        }
+
+        _syncingAlwaysOnTop = true;
+        try
+        {
+            _settings.AlwaysOnTop = onTop;
+
+            // Assigning the value it already has does nothing, so it is cleared first. That is
+            // what puts the window back above anything since placed in front of it.
+            TopMost = false;
+            TopMost = onTop;
+
+            _alwaysOnTopCheckBox.Checked = onTop;
+            if (_alwaysOnTopMenuItem is not null)
+            {
+                _alwaysOnTopMenuItem.Checked = onTop;
+            }
+        }
+        finally
+        {
+            _syncingAlwaysOnTop = false;
+        }
     }
 
     private void ApplyOpacity(int opacityPercent)
@@ -332,7 +427,13 @@ internal sealed class CaptionBridgeForm : Form
 
     private void OnCaptionChanged(object? sender, string caption)
     {
-        Volatile.Write(ref _pendingCaption, caption);
+        string transcript;
+        lock (_transcriptLock)
+        {
+            transcript = _transcript.Absorb(caption);
+        }
+
+        Volatile.Write(ref _pendingCaption, transcript);
         QueueRender();
     }
 
@@ -376,42 +477,16 @@ internal sealed class CaptionBridgeForm : Form
             return;
         }
 
-        var available = Volatile.Read(ref _pendingAvailable);
-        UpdateTitle(available);
+        UpdateTitle(Volatile.Read(ref _pendingAvailable));
 
-        if (IsHoldingForSelection)
-        {
-            return;
-        }
-
-        if (!available)
-        {
-            if (!_showingIdleHint)
-            {
-                SetCaptionText(IdleHint);
-                _showingIdleHint = true;
-            }
-
-            return;
-        }
-
-        if (_showingIdleHint)
-        {
-            // The hint shares no prefix with real captions; drop it before diffing.
-            SetCaptionText(string.Empty);
-            _showingIdleHint = false;
-        }
-
+        // The transcript stands whether or not Live Captions is still running. Closing it stops
+        // the text growing rather than taking it away; the title bar carries the explanation.
         SetCaptionText(Volatile.Read(ref _pendingCaption));
     }
 
     private void UpdateTitle(bool available)
     {
-        var suffix = !available
-            ? " \u2014 waiting for Live Captions"
-            : IsHoldingForSelection
-                ? " \u2014 paused while text is selected"
-                : string.Empty;
+        var suffix = available ? string.Empty : " \u2014 waiting for Live Captions";
 
         if (!string.Equals(suffix, _statusSuffix, StringComparison.Ordinal))
         {
@@ -427,93 +502,14 @@ internal sealed class CaptionBridgeForm : Form
             return;
         }
 
-        var prefix = CommonPrefixLength(_renderedText, text);
-        var replacedLength = _renderedText.Length - prefix;
-
-        // Replacing just the tail lets the edit control repaint only the lines that changed,
-        // which is what keeps a 25 ms refresh from looking like a strobe. A large replacement
-        // means the transcript rolled over, and a plain assignment repaints less than that.
-        if (prefix > 0 && replacedLength <= 256)
-        {
-            ReplaceTail(prefix, replacedLength, text[prefix..]);
-        }
-        else
-        {
-            SetRedraw(false);
-            try
-            {
-                _captionTextBox.Text = text;
-            }
-            finally
-            {
-                SetRedraw(true);
-            }
-        }
-
+        _captionTextBox.ApplyTranscript(_renderedText, text);
         _renderedText = text;
-        ScrollToBottom();
-    }
 
-    private void ReplaceTail(int start, int length, string insertedText)
-    {
-        // EM_REPLACESEL is ignored while ES_READONLY is set, so the flag comes off for the
-        // duration of the programmatic edit only.
-        _captionTextBox.ReadOnly = false;
-        try
+        // Pulling the view down mid-drag would slide the words out from under the pointer.
+        if (!_captionTextBox.IsSelecting)
         {
-            _captionTextBox.SelectionStart = start;
-            _captionTextBox.SelectionLength = length;
-            _captionTextBox.SelectedText = insertedText;
+            _captionTextBox.ScrollToBottom();
         }
-        finally
-        {
-            _captionTextBox.ReadOnly = true;
-        }
-    }
-
-    private static int CommonPrefixLength(string left, string right)
-    {
-        var max = Math.Min(left.Length, right.Length);
-        var length = 0;
-        while (length < max && left[length] == right[length])
-        {
-            length++;
-        }
-
-        return length > 0 && char.IsHighSurrogate(left[length - 1]) ? length - 1 : length;
-    }
-
-    private void SetRedraw(bool enabled)
-    {
-        if (!_captionTextBox.IsHandleCreated)
-        {
-            return;
-        }
-
-        NativeMethods.SendMessage(
-            _captionTextBox.Handle,
-            NativeMethods.WmSetRedraw,
-            enabled ? new IntPtr(1) : IntPtr.Zero,
-            IntPtr.Zero);
-
-        if (enabled)
-        {
-            _captionTextBox.Invalidate();
-        }
-    }
-
-    private void ScrollToBottom()
-    {
-        if (!_captionTextBox.IsHandleCreated)
-        {
-            return;
-        }
-
-        NativeMethods.SendMessage(
-            _captionTextBox.Handle,
-            NativeMethods.WmVScroll,
-            new IntPtr(NativeMethods.SbBottom),
-            IntPtr.Zero);
     }
 
     private void ApplySavedPlacement()

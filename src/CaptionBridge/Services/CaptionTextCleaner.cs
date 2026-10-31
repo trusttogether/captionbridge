@@ -1,9 +1,9 @@
 namespace CaptionBridge.Services;
 
 /// <summary>
-/// Turns the raw text fragments read out of the Live Captions window into the single
-/// line of speech the window is currently showing. This is deliberately a mirror: it
-/// never merges history, re-orders text, or guesses at a "better" transcript.
+/// Turns the raw text fragments read out of the Live Captions window into the single line of
+/// speech the window is currently showing. Nothing here re-orders text or guesses at a "better"
+/// reading of it; joining one window to the next is <see cref="CaptionTranscript"/>'s job.
 /// </summary>
 internal static class CaptionTextCleaner
 {

@@ -8,8 +8,14 @@ internal static class Program
     private const string SingleInstanceMutexName = "CaptionBridge.SingleInstance";
     private const string ActivateRequestEventName = "CaptionBridge.ActivateRequest";
 
+    /// <summary>
+    /// Leaves Live Captions alone at startup. Used by tools/verify-mirror.ps1, which mirrors a
+    /// stand-in window that a real Live Captions window would win the title match against.
+    /// </summary>
+    private const string NoAutoStartSwitch = "--no-autostart";
+
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         using var singleInstanceMutex = new Mutex(true, SingleInstanceMutexName, out var createdNew);
         if (!createdNew)
@@ -24,7 +30,9 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        using var form = new CaptionBridgeForm();
+        var autoStartLiveCaptions = !args.Contains(NoAutoStartSwitch, StringComparer.OrdinalIgnoreCase);
+
+        using var form = new CaptionBridgeForm(autoStartLiveCaptions);
         var listener = StartActivationRequestListener(form);
         try
         {
